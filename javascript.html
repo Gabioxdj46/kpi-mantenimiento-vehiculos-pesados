@@ -1,0 +1,1786 @@
+<script>
+  google.charts.load('current', { packages: ['corechart', 'bar', 'table', 'gauge'] });
+
+  const state = {
+    bootstrap: null,
+    filters: {},
+    activeTab: 'dashboard',
+    dashboard: null,
+    general: null,
+    alerts: null,
+    fleetProjectChanges: {},
+    routeDeletes: {}
+  };
+
+  const FLEET_IMPORT_ORDER = ['plate', 'project', 'type', 'brand', 'model', 'motorSerial', 'chassisSerial', 'year', 'color', 'motorCycleKm', 'boxCycleKm'];
+  const MAINTENANCE_IMPORT_ORDER = ['plate', 'workshop', 'entryDate', 'exitDate', 'type', 'odometer', 'kmBetween', 'preventiveTime', 'correctiveTime', 'package', 'orderNumber', 'cost', 'mechanic', 'observations'];
+  const ROUTE_IMPORT_ORDER = ['startDate', 'endDate', 'plate', 'kmStart', 'kmEnd', 'kms', 'hours', 'gallons', 'observations'];
+  const PROJECT_THEMES = {
+    auca: ['#1fe088', '#39d2ff', 'rgba(31, 224, 136, 0.16)'],
+    petroecuador: ['#ffb020', '#1fe088', 'rgba(255, 176, 32, 0.16)'],
+    shaya: ['#8f7cff', '#39d2ff', 'rgba(143, 124, 255, 0.16)'],
+    enap: ['#39d2ff', '#8f7cff', 'rgba(57, 210, 255, 0.16)'],
+    baseort: ['#ff4d6d', '#ffb020', 'rgba(255, 77, 109, 0.15)'],
+    pcr: ['#15c8c8', '#1fe088', 'rgba(21, 200, 200, 0.16)']
+  };
+
+  document.addEventListener('DOMContentLoaded', () => {
+    bindUi();
+    google.charts.setOnLoadCallback(initApp);
+  });
+
+  function bindUi() {
+    document.querySelectorAll('.tab').forEach((btn) => {
+      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+    ['yearFilter', 'monthFilter', 'projectFilter', 'plateFilter'].forEach((id) => {
+      document.getElementById(id).addEventListener('change', handleFilterChange);
+    });
+    document.getElementById('openFleetImportBtn').addEventListener('click', openContextImportModal);
+    document.getElementById('exportPdfBtn').addEventListener('click', () => window.print());
+    document.getElementById('printBtn').addEventListener('click', () => window.print());
+    document.getElementById('routeForm').addEventListener('submit', submitRoute);
+    document.querySelectorAll('#routeForm [name="kmStart"], #routeForm [name="kmEnd"]').forEach((input) => {
+      input.addEventListener('input', updateRouteTotalKm);
+    });
+    document.getElementById('maintenanceForm').addEventListener('submit', submitMaintenance);
+    document.getElementById('fleetForm').addEventListener('submit', submitFleet);
+    document.getElementById('maintenanceType').addEventListener('change', fillPackageOptions);
+    const drivePdfBtn = document.getElementById('drivePdfBtn');
+    if (drivePdfBtn) drivePdfBtn.addEventListener('click', createDrivePdf);
+    document.getElementById('saveFleetProjectsBtn').addEventListener('click', saveFleetProjectChanges);
+    document.getElementById('dedupeFleetBtn').addEventListener('click', cleanFleetDuplicates);
+    document.getElementById('dedupeMaintenanceBtn').addEventListener('click', cleanMaintenanceDuplicates);
+    document.getElementById('dedupeRoutesBtn').addEventListener('click', cleanRouteDuplicates);
+    document.getElementById('saveRouteDeletesBtn').addEventListener('click', saveRouteDeletes);
+    document.getElementById('closeFleetImportBtn').addEventListener('click', closeFleetImportModal);
+    document.getElementById('fleetImportModal').addEventListener('click', (event) => {
+      if (event.target.id === 'fleetImportModal') closeFleetImportModal();
+    });
+    document.getElementById('closeMaintenanceImportBtn').addEventListener('click', closeMaintenanceImportModal);
+    document.getElementById('maintenanceImportModal').addEventListener('click', (event) => {
+      if (event.target.id === 'maintenanceImportModal') closeMaintenanceImportModal();
+    });
+    document.getElementById('closeRouteImportBtn').addEventListener('click', closeRouteImportModal);
+    document.getElementById('routeImportModal').addEventListener('click', (event) => {
+      if (event.target.id === 'routeImportModal') closeRouteImportModal();
+    });
+    document.getElementById('fleetImportCsvBtn').addEventListener('click', importFleetCsvText);
+    document.getElementById('fleetImportFileBtn').addEventListener('click', importFleetFile);
+    document.getElementById('maintenanceImportCsvBtn').addEventListener('click', importMaintenanceCsvText);
+    document.getElementById('maintenanceImportFileBtn').addEventListener('click', importMaintenanceFile);
+    document.getElementById('routeImportCsvBtn').addEventListener('click', importRouteCsvText);
+    document.getElementById('routeImportFileBtn').addEventListener('click', importRouteFile);
+    document.getElementById('printAlertsBtn').addEventListener('click', () => window.print());
+    document.getElementById('driveAlertsPdfBtn').addEventListener('click', createAlertsPdf);
+    const importCsvBtn = document.getElementById('importCsvBtn');
+    if (importCsvBtn) importCsvBtn.addEventListener('click', importCsv);
+    const importSheetBtn = document.getElementById('importSheetBtn');
+    if (importSheetBtn) importSheetBtn.addEventListener('click', importSheet);
+    window.addEventListener('resize', debounce(() => renderActive(), 250));
+  }
+
+  async function initApp() {
+    showLoading(true);
+    try {
+      state.bootstrap = await runServer('getBootstrapData');
+      fillFilters();
+      applyProjectTheme();
+      updateVehicleSelects();
+      updateFilterVisibility();
+      fillPackageOptions();
+      await refreshCurrent();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  function runServer(name, payload) {
+    return new Promise((resolve, reject) => {
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(reject)[name](payload);
+    });
+  }
+
+  function fillFilters() {
+    const b = state.bootstrap;
+    const previous = state.filters || {};
+    fillSelect('yearFilter', b.years, null, previous.year || String(new Date().getFullYear()));
+    fillMonthSelect();
+    fillSelect('projectFilter', [''].concat(b.projects), 'Todos', previous.project);
+    document.querySelectorAll('[data-project-select]').forEach((sel) => fillSelectElement(sel, b.projects));
+    fillDatalist('typeOptions', b.types);
+    fillDatalist('brandOptions', b.brands);
+    if (previous.month !== undefined) document.getElementById('monthFilter').value = previous.month || '';
+    applyProjectTheme();
+  }
+
+  function fillMonthSelect() {
+    const select = document.getElementById('monthFilter');
+    select.innerHTML = state.bootstrap.config.monthOptions.map((item) => (
+      `<option value="${item.value}">${item.label}</option>`
+    )).join('');
+  }
+
+  function fillSelect(id, items, emptyLabel, preferred) {
+    fillSelectElement(document.getElementById(id), items, emptyLabel, preferred);
+  }
+
+  function fillSelectElement(select, items, emptyLabel, preferred) {
+    select.innerHTML = '';
+    items.forEach((item) => {
+      const opt = document.createElement('option');
+      opt.value = item || '';
+      opt.textContent = item || emptyLabel || 'Todos';
+      if (preferred && String(item) === String(preferred)) opt.selected = true;
+      select.appendChild(opt);
+    });
+  }
+
+  function fillDatalist(id, items) {
+    const list = document.getElementById(id);
+    list.innerHTML = items.map((item) => `<option value="${escapeHtml(item)}"></option>`).join('');
+  }
+
+  function updateVehicleSelects() {
+    const filters = readFilters();
+    const vehicles = state.bootstrap.vehicles.filter((v) => {
+      if (filters.project && norm(v.project) !== norm(filters.project)) return false;
+      return true;
+    });
+    const plateFilter = document.getElementById('plateFilter');
+    const selected = plateFilter.value;
+    fillSelectElement(plateFilter, [''].concat(vehicles.map((v) => v.plate)), 'Todas');
+    if (vehicles.some((v) => v.plate === selected)) plateFilter.value = selected;
+    document.querySelectorAll('[data-vehicle-select]').forEach((sel) => {
+      fillSelectElement(sel, vehicles.map((v) => v.plate));
+    });
+  }
+
+  function readFilters() {
+    return {
+      year: Number(document.getElementById('yearFilter').value),
+      month: Number(document.getElementById('monthFilter').value || 0),
+      project: document.getElementById('projectFilter').value,
+      plate: document.getElementById('plateFilter').value
+    };
+  }
+
+  function readGeneralFilters() {
+    return {
+      year: Number(document.getElementById('yearFilter').value),
+      project: document.getElementById('projectFilter').value
+    };
+  }
+
+  function readAlertFilters() {
+    return {
+      project: document.getElementById('projectFilter').value
+    };
+  }
+
+  function updateFilterVisibility() {
+    const generalOnly = state.activeTab === 'general';
+    const alertsOnly = state.activeTab === 'alerts';
+    const fleetOnly = state.activeTab === 'fleet';
+    const reportsOnly = state.activeTab === 'reports';
+    document.querySelector('.filter-year').classList.toggle('hidden-filter', alertsOnly);
+    document.querySelector('.filter-month').classList.toggle('hidden-filter', generalOnly || alertsOnly || fleetOnly);
+    document.querySelector('.filter-plate').classList.toggle('hidden-filter', generalOnly || alertsOnly);
+    document.getElementById('openFleetImportBtn').classList.toggle('hidden', reportsOnly);
+  }
+
+  async function handleFilterChange(event) {
+    if (event.target.id === 'projectFilter') applyProjectTheme();
+    if (event.target.id !== 'plateFilter') updateVehicleSelects();
+    await refreshCurrent();
+  }
+
+  function applyProjectTheme() {
+    const project = document.getElementById('projectFilter') ? document.getElementById('projectFilter').value : '';
+    const theme = PROJECT_THEMES[norm(project)] || ['#39d2ff', '#8f7cff', 'rgba(57, 210, 255, 0.14)'];
+    document.documentElement.style.setProperty('--project-accent', theme[0]);
+    document.documentElement.style.setProperty('--project-accent-2', theme[1]);
+    document.documentElement.style.setProperty('--project-soft', theme[2]);
+  }
+
+  function monthName(month) {
+    const item = state.bootstrap.config.monthOptions.find((option) => Number(option.value) === Number(month));
+    return item ? item.label : '';
+  }
+
+  async function refreshCurrent() {
+    state.filters = readFilters();
+    showLoading(true);
+    try {
+      if (state.activeTab === 'dashboard') {
+        state.dashboard = await runServer('getDashboardData', state.filters);
+        renderDashboard();
+      } else if (state.activeTab === 'general') {
+        state.general = await runServer('getGeneralReportData', readGeneralFilters());
+        renderGeneral();
+      } else if (state.activeTab === 'alerts') {
+        const data = await runServer('getAlertsData', readAlertFilters());
+        state.alerts = data.alerts;
+        renderAlerts(state.alerts);
+      } else if (state.activeTab === 'routes') {
+        renderRoutesTable();
+      } else if (state.activeTab === 'maintenance') {
+        renderMaintenanceTable();
+      } else if (state.activeTab === 'fleet') {
+        renderFleetTable();
+      } else if (state.activeTab === 'reports') {
+        await renderReportsPreview();
+      }
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  function renderActive() {
+    if (state.activeTab === 'dashboard' && state.dashboard) renderDashboard();
+    if (state.activeTab === 'general' && state.general) renderGeneral();
+    if (state.activeTab === 'alerts' && state.alerts) renderAlerts(state.alerts);
+  }
+
+  async function switchTab(tab) {
+    state.activeTab = tab;
+    document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+    document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === tab));
+    updateFilterVisibility();
+    await refreshCurrent();
+  }
+
+  function renderDashboard() {
+    const data = state.dashboard;
+    if (!data) return;
+    document.getElementById('vehicleBadge').textContent = [
+      data.vehicle.plate || 'Todos',
+      data.vehicle.brand,
+      data.vehicle.type
+    ].filter(Boolean).join(' · ');
+    const metric = data.metric || defaultMetric();
+    document.getElementById('chartTotalKmsTitle').textContent = metric.totalTitle || 'Kilometros recorridos totales';
+    document.getElementById('chartKmPerMaintenanceTitle').textContent = metric.maintenanceTitle || 'Kilometros por mantenimiento';
+    renderKpiCards(data.summary, data.yearSummary, data.periodLabel, metric);
+    drawTotalKms(data.chartSeries, metric);
+    drawTotalGallons(data.chartSeries);
+    drawKmPerGallon(data.chartSeries, metric);
+    drawMaintenance(data.chartSeries);
+    drawMaintenanceCosts(data.chartSeries);
+    drawKmPerMaintenance(data.chartSeries, metric);
+    drawMtbf(data.chartSeries);
+    drawMttr(data.chartSeries);
+    drawAvailabilityTrend(data.chartSeries);
+    renderRanking(data.ranking);
+    renderAlertList(data.alerts, 'alertList');
+    renderMonthlyKpiTable(data.monthlyKpis, data.filters.month);
+  }
+
+  function renderKpiCards(summary, yearSummary, periodLabel, metric) {
+    metric = metric || defaultMetric();
+    const cards = [
+      [`${metric.totalLabel} periodo`, fmt(summary.kms), metric.unit, 'cyan', `Total año: ${fmt(yearSummary.kms)} ${metric.unit}`],
+      ['Galones periodo', fmt(summary.gallons), 'gal', 'violet', `Total año: ${fmt(yearSummary.gallons)} gal`],
+      [metric.perFuelLabel, fmt(summary.kmPerGallon), metric.perFuelUnit, 'green', `Año: ${fmt(yearSummary.kmPerGallon)} ${metric.perFuelUnit}`],
+      ['Disponibilidad', fmt(summary.availability), '%', 'amber', `Año: ${fmt(yearSummary.availability)}%`],
+      ['Preventivos', fmt(summary.preventive), 'und', 'blue', `Año: ${fmt(yearSummary.preventive)}`],
+      ['Correctivos', fmt(summary.corrective), 'und', 'red', `Año: ${fmt(yearSummary.corrective)}`],
+      [metric.perMaintenanceLabel, fmt(summary.kmPerMaintenance), metric.perMaintenanceUnit, 'teal', `Año: ${fmt(yearSummary.kmPerMaintenance)} ${metric.perMaintenanceUnit}`],
+      ['MTTR / MTBF', `${fmt(summary.mttr)} / ${fmt(summary.mtbf)}`, 'h', 'orange', periodLabel]
+    ];
+    document.getElementById('kpiCards').innerHTML = cards.map(([label, value, unit, tone, note]) => `
+      <div class="kpi-card ${tone}">
+        <span>${label}</span>
+        <strong>${value}</strong>
+        <small>${unit} · ${note}</small>
+      </div>
+    `).join('');
+  }
+
+  function renderMonthlyKpiTable(rows, selectedMonth) {
+    const months = state.bootstrap.config.monthNames;
+    document.getElementById('monthlyKpiTable').innerHTML = `
+      <thead><tr><th>Indicador</th>${months.map((m, i) => `<th class="${selectedMonth === i + 1 ? 'selected-month' : ''}">${m}</th>`).join('')}<th>Total</th></tr></thead>
+      <tbody>${rows.map((r) => `<tr><td>${r.label}</td>${r.values.map((v, i) => `<td class="${selectedMonth === i + 1 ? 'selected-month' : ''}">${fmt(v)}</td>`).join('')}<td>${fmt(r.total)}</td></tr>`).join('')}</tbody>
+    `;
+  }
+
+  function drawTotalKms(series, metric) {
+    metric = metric || defaultMetric();
+    const data = google.visualization.arrayToDataTable([
+      ['Mes', metric.totalLabel, { role: 'style' }, { role: 'tooltip', type: 'string', p: { html: true } }],
+      ...series.map((m) => [m.month, m.kms, m.selected ? 'color:#39d2ff;stroke-color:#ffffff;stroke-width:2' : 'color:#159ed3', tooltip(metric.totalLabel, m.month, `${fmt(m.kms)} ${metric.unit}`)])
+    ]);
+    new google.visualization.ColumnChart(document.getElementById('chartTotalKms')).draw(data, chartOptions({ colors: ['#39d2ff'] }));
+  }
+
+  function drawTotalGallons(series) {
+    const data = google.visualization.arrayToDataTable([
+      ['Mes', 'Galones', { role: 'style' }, { role: 'tooltip', type: 'string', p: { html: true } }],
+      ...series.map((m) => [m.month, m.gallons, m.selected ? 'color:#b78cff;stroke-color:#ffffff;stroke-width:2' : 'color:#7f5af0', tooltip('Galones cargados', m.month, `${fmt(m.gallons)} gal`)])
+    ]);
+    new google.visualization.ColumnChart(document.getElementById('chartTotalGallons')).draw(data, chartOptions({ colors: ['#7f5af0'] }));
+  }
+
+  function drawMaintenance(series) {
+    const data = google.visualization.arrayToDataTable([
+      ['Mes', 'Preventivos', 'Correctivos', { role: 'annotation' }],
+      ...series.map((m) => [m.month, m.preventive, m.corrective, m.selected ? 'Mes elegido' : null])
+    ]);
+    new google.visualization.ColumnChart(document.getElementById('chartMaintenance')).draw(data, chartOptions({ isStacked: true, colors: ['#1fe088', '#ff4d6d'] }));
+  }
+
+  function drawKmPerGallon(series, metric) {
+    metric = metric || defaultMetric();
+    const label = metric.isHourBased ? 'Horas por galon' : 'Kilometros por galon';
+    const unit = metric.isHourBased ? 'h/gal' : 'km/gal';
+    const data = google.visualization.arrayToDataTable([
+      ['Mes', label, { role: 'tooltip', type: 'string', p: { html: true } }],
+      ...series.map((m) => [
+        m.month,
+        m.kmPerGallon,
+        tooltip(label, m.month, `${fmt(m.kmPerGallon)} ${unit}<br>${fmt(m.kms)} ${metric.unit} / ${fmt(m.gallons)} gal`)
+      ])
+    ]);
+    new google.visualization.LineChart(document.getElementById('chartKmPerGallon')).draw(data, chartOptions({
+      colors: ['#1fe088'],
+      curveType: 'function',
+      lineWidth: 4,
+      pointSize: 8,
+      vAxis: { title: unit, textStyle: { color: '#b8c7d9' }, titleTextStyle: { color: '#b8c7d9' }, gridlines: { color: '#26384a' } }
+    }));
+  }
+
+  function drawMaintenanceCosts(series) {
+    const data = google.visualization.arrayToDataTable([
+      ['Mes', 'Preventivo $', 'Correctivo $', { role: 'tooltip', type: 'string', p: { html: true } }],
+      ...series.map((m) => [
+        m.month,
+        m.preventiveCost,
+        m.correctiveCost,
+        tooltip('Costos por mantenimiento', m.month, `Preventivo: ${money(m.preventiveCost)}<br>Correctivo: ${money(m.correctiveCost)}<br>Total: ${money(m.maintenanceCost)}`)
+      ])
+    ]);
+    new google.visualization.LineChart(document.getElementById('chartMaintenanceCosts')).draw(data, chartOptions({
+      colors: ['#1fe088', '#ff4d6d'],
+      curveType: 'function',
+      lineWidth: 4,
+      pointSize: 8,
+      vAxis: { title: 'USD', format: '$#,##0', textStyle: { color: '#b8c7d9' }, titleTextStyle: { color: '#b8c7d9' }, gridlines: { color: '#26384a' } }
+    }));
+  }
+
+  function drawKmPerMaintenance(series, metric) {
+    metric = metric || defaultMetric();
+    const data = google.visualization.arrayToDataTable([
+      ['Mes', `Real ${metric.perMaintenanceUnit}`, 'Esperado fabricante', 'Desfase'],
+      ...series.map((m) => [m.month, m.kmPerMaintenance, m.expectedKmPerMaintenance, m.maintenanceDeviation])
+    ]);
+    new google.visualization.ComboChart(document.getElementById('chartKmPerMaintenance')).draw(data, chartOptions({
+      seriesType: 'bars',
+      series: {
+        1: { type: 'line', lineWidth: 4, pointSize: 7 },
+        2: { type: 'line', lineWidth: 3, pointSize: 6, targetAxisIndex: 1 }
+      },
+      colors: ['#39d2ff', '#1fe088', '#ffb020'],
+      vAxes: {
+        0: { title: metric.perMaintenanceLabel, textStyle: { color: '#b8c7d9' }, titleTextStyle: { color: '#b8c7d9' }, gridlines: { color: '#26384a' } },
+        1: { title: 'Desfase', textStyle: { color: '#b8c7d9' }, titleTextStyle: { color: '#b8c7d9' }, gridlines: { color: 'transparent' } }
+      }
+    }));
+  }
+
+  function drawMtbf(series) {
+    const data = google.visualization.arrayToDataTable([
+      ['Mes', 'MTBF', { role: 'tooltip', type: 'string', p: { html: true } }],
+      ...series.map((m) => [
+        m.month,
+        m.mtbf,
+        tooltip('Tiempo medio entre fallas (MTBF)', m.month, `MTBF: ${fmt(m.mtbf)} h<br>Tiempo programado: ${fmt(m.plannedHours)} h<br>Tiempo preventivo: ${fmt(m.preventiveTime)} h<br>Tiempo correctivo: ${fmt(m.correctiveTime)} h<br>Fallas: ${fmt(m.corrective)}`)
+      ])
+    ]);
+    new google.visualization.ColumnChart(document.getElementById('chartMtbf')).draw(data, chartOptions({
+      colors: ['#8f7cff'],
+      vAxis: { title: 'Horas entre fallas', textStyle: { color: '#b8c7d9' }, titleTextStyle: { color: '#b8c7d9' }, gridlines: { color: '#26384a' } }
+    }));
+  }
+
+  function drawMttr(series) {
+    const data = google.visualization.arrayToDataTable([
+      ['Mes', 'MTTR', { role: 'tooltip', type: 'string', p: { html: true } }],
+      ...series.map((m) => [
+        m.month,
+        m.mttr,
+        tooltip('Tiempo medio entre reparacion (MTTR)', m.month, `MTTR: ${fmt(m.mttr)} h<br>Tiempo correctivo: ${fmt(m.correctiveTime)} h<br>Reparaciones/Fallas: ${fmt(m.corrective)}`)
+      ])
+    ]);
+    new google.visualization.ColumnChart(document.getElementById('chartMttr')).draw(data, chartOptions({
+      colors: ['#ffb020'],
+      vAxis: { title: 'Horas por reparacion', textStyle: { color: '#b8c7d9' }, titleTextStyle: { color: '#b8c7d9' }, gridlines: { color: '#26384a' } }
+    }));
+  }
+
+  function drawAvailabilityTrend(series) {
+    const data = google.visualization.arrayToDataTable([
+      ['Mes', 'Disponibilidad MTBF/MTTR', 'Disponibilidad Operativa', { role: 'tooltip', type: 'string', p: { html: true } }],
+      ...series.map((m) => [
+        m.month,
+        m.availability,
+        m.operationalAvailability,
+        tooltip('Disponibilidad del equipo', m.month, `MTBF/MTTR: ${fmt(m.availability)}%<br>Operativa: ${fmt(m.operationalAvailability)}%<br>Horas programadas: ${fmt(m.plannedHours)} h<br>Horas fuera de servicio: ${fmt(m.downtimeHours)} h`)
+      ])
+    ]);
+    new google.visualization.AreaChart(document.getElementById('chartAvailability')).draw(data, chartOptions({
+      colors: ['#1fe088', '#39d2ff'],
+      vAxis: { minValue: 0, maxValue: 100, textStyle: { color: '#b8c7d9' }, gridlines: { color: '#26384a' } },
+      areaOpacity: 0.22,
+      lineWidth: 4,
+      pointSize: 7
+    }));
+  }
+
+  function chartOptions(extra) {
+    return Object.assign({
+      height: 300,
+      legend: { position: 'bottom', textStyle: { color: '#dce8f5' } },
+      chartArea: { left: 56, top: 24, right: 24, bottom: 58 },
+      backgroundColor: 'transparent',
+      fontName: 'Arial',
+      focusTarget: 'category',
+      aggregationTarget: 'category',
+      selectionMode: 'multiple',
+      tooltip: { isHtml: true, trigger: 'focus' },
+      crosshair: { trigger: 'both', orientation: 'vertical', color: '#39d2ff', opacity: 0.35 },
+      animation: { startup: true, duration: 600, easing: 'out' },
+      hAxis: { textStyle: { color: '#b8c7d9' }, gridlines: { color: '#26384a' } },
+      vAxis: { minValue: 0, textStyle: { color: '#b8c7d9' }, gridlines: { color: '#26384a' } }
+    }, extra || {});
+  }
+
+  function tooltip(title, month, value) {
+    return `<div class="chart-tooltip"><b>${title}</b><span>${month}</span><strong>${value}</strong></div>`;
+  }
+
+  function renderRanking(rows) {
+    const top = rows.slice(0, 8);
+    const max = Math.max(...top.map((r) => r.kms), 1);
+    document.getElementById('rankingList').innerHTML = top.map((r) => `
+      <div class="rank-row">
+        <strong>${escapeHtml(r.plate)}</strong>
+        <div><div class="bar"><i style="width:${Math.min(100, (r.kms / max) * 100)}%"></i></div><small>${escapeHtml(r.brand || '')} ${escapeHtml(r.type || '')}</small></div>
+        <span>${fmt(r.kms)} km</span>
+      </div>
+    `).join('');
+  }
+
+  function renderAlertList(alerts, id) {
+    document.getElementById(id).innerHTML = alerts.map((a) => alertRow(a)).join('') || '<p class="muted">Sin alertas para los filtros actuales.</p>';
+  }
+
+  function renderAlerts(alerts) {
+    const rows = alerts || [];
+    const summary = rows.reduce((acc, item) => {
+      acc[item.severity] = (acc[item.severity] || 0) + 1;
+      return acc;
+    }, { ok: 0, warning: 0, critical: 0 });
+
+    if (!rows.length) {
+      document.getElementById('alertBoard').innerHTML = `
+        <div class="panel alert-empty">
+          <h3>Sin vehiculos para el proyecto seleccionado</h3>
+          <p class="muted">Cuando agregues vehiculos en Flota Vehicular y cargues rutas o mantenimientos, apareceran aqui automaticamente.</p>
+        </div>
+      `;
+      return;
+    }
+
+    document.getElementById('alertBoard').innerHTML = `
+      <div class="alerts-summary">
+        <div class="alert-summary-card critical"><span>Vencidos o urgentes</span><strong>${fmt(summary.critical)}</strong></div>
+        <div class="alert-summary-card warning"><span>Proximos</span><strong>${fmt(summary.warning)}</strong></div>
+        <div class="alert-summary-card ok"><span>En rango</span><strong>${fmt(summary.ok)}</strong></div>
+      </div>
+      <div class="panel alerts-control-panel">
+        <div class="panel-head">
+          <h3>Panel vertical de mantenimiento preventivo</h3>
+          <span class="badge">${escapeHtml(document.getElementById('projectFilter').value || 'Todos los proyectos')}</span>
+        </div>
+        <div class="table-scroll alerts-scroll">
+          <table class="alerts-table">
+            <thead>
+              <tr>
+                <th>Descripcion vehiculo</th>
+                <th>Placa</th>
+                <th>Ciclo motor</th>
+                <th>Ciclo caja</th>
+                <th>Lectura actual</th>
+                <th>Fecha lectura</th>
+                <th>Ultima caja</th>
+                <th>Ultimo motor</th>
+                <th>Fecha mto motor</th>
+                <th>Prox. motor</th>
+                <th>Prox. caja</th>
+                <th>Faltan motor</th>
+                <th>% vida motor</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((a) => alertTableRow(a)).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function alertTableRow(a) {
+    const percent = Math.max(0, Math.min(100, Number(a.lifePercent) || 0));
+    const unit = a.measureUnit || 'km';
+    return `
+      <tr class="alert-table-row ${a.severity}">
+        <td class="vehicle-desc"><strong>${escapeHtml(a.description || a.type || '')}</strong><small>${escapeHtml([a.brand, a.model].filter(Boolean).join(' '))}</small></td>
+        <td class="plate-cell">${escapeHtml(a.plate)}</td>
+        <td>${fmt(a.motorCycleKm)} ${unit}</td>
+        <td>${fmt(a.boxCycleKm)} ${unit}</td>
+        <td>${fmt(a.currentKm)} ${unit}</td>
+        <td>${formatDateShort(a.currentKmDate)}</td>
+        <td>${fmt(a.lastBoxMaintenanceKm)} ${unit}</td>
+        <td>${fmt(a.lastMotorMaintenanceKm)} ${unit}</td>
+        <td>${formatDateShort(a.lastMotorMaintenanceDate)}</td>
+        <td>${fmt(a.nextMotorMaintenanceKm)} ${unit}</td>
+        <td>${fmt(a.nextBoxMaintenanceKm)} ${unit}</td>
+        <td class="km-alert ${a.severity}">${fmt(a.kmToMaintenance)} ${unit}</td>
+        <td class="life-cell" style="${lifeCellStyle(percent)}">
+          <span>${fmt(percent)}%</span>
+          <i style="width:${percent}%"></i>
+        </td>
+      </tr>
+    `;
+  }
+
+  function lifeCellStyle(percent) {
+    const hue = Math.round(percent * 1.2);
+    const text = percent > 58 ? '#052016' : '#ffffff';
+    return `background:hsl(${hue}, 82%, 43%);color:${text}`;
+  }
+
+  function alertRow(a, expanded) {
+    return `
+      <div class="alert-row severity ${a.severity}">
+        <strong>${escapeHtml(a.plate)}</strong>
+        <div>
+          <b>${escapeHtml(a.message)}</b>
+          <div class="bar"><i style="width:${Math.max(0, Math.min(100, a.lifePercent))}%;background:${a.severity === 'critical' ? '#d64545' : a.severity === 'warning' ? '#f0a202' : '#1f9d68'}"></i></div>
+          <small>${escapeHtml(a.project)} · ${escapeHtml(a.brand)} ${escapeHtml(a.type)}</small>
+        </div>
+        <span>${fmt(a.kmToMaintenance)} km</span>
+        ${expanded ? `<small>Km actual: ${fmt(a.currentKm)} · Ciclo: ${fmt(a.cycleKm)}</small>` : ''}
+      </div>
+    `;
+  }
+
+  function renderGeneral() {
+    const data = state.general;
+    const heading = `${escapeHtml(data.filters.project || 'Todos los proyectos')} · ${escapeHtml(data.filters.year)}`;
+    document.getElementById('generalTables').innerHTML = `
+      <div class="report-context">
+        <span class="badge">${heading}</span>
+        <span class="muted">${data.tables[0] ? data.tables[0].rows.length : 0} vehiculos encontrados</span>
+      </div>
+      ${data.tables.map((table) => `
+      <div class="panel metric-table metric-${escapeHtml(table.key)}">
+        <div class="panel-head"><h3>${escapeHtml(table.title)}</h3><span class="badge">${escapeHtml(table.unit)}</span></div>
+        <div class="table-scroll">
+          <table class="data-table compact">
+            <thead><tr><th>Placa</th><th>Tipo</th>${data.months.map((m) => `<th>${m}</th>`).join('')}<th>Total</th></tr></thead>
+            <tbody>${table.rows.map((r) => `<tr><td>${escapeHtml(r.plate)}</td><td>${escapeHtml(r.type || '')}</td>${r.values.map((v) => `<td>${fmt(v)}</td>`).join('')}<td>${fmt(r.total)}</td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+      </div>
+    `).join('')}`;
+  }
+
+  async function renderReportsPreview() {
+    const filters = readFilters();
+    const [dashboard, general, alertsData, maintenanceData] = await Promise.all([
+      runServer('getDashboardData', filters),
+      runServer('getGeneralReportData', readGeneralFilters()),
+      runServer('getAlertsData', { project: filters.project }),
+      runServer('getTableData', { key: 'maintenance', filters })
+    ]);
+    const maintenanceRows = maintenanceData.rows || [];
+    const alertRows = alertsData.alerts || [];
+    const reportMetric = dashboard.metric || defaultMetric();
+    const reportContext = [
+      filters.year ? `Ano ${filters.year}` : '',
+      filters.month ? monthName(filters.month) : 'Todo el ano',
+      filters.project ? `Proyecto ${filters.project}` : 'Todos los proyectos',
+      filters.plate ? `Placa ${filters.plate}` : 'Todas las placas'
+    ].filter(Boolean).join(' · ');
+    document.getElementById('reportPreviewContext').textContent = reportContext;
+
+    const selectedGeneralTables = buildReportGeneralTables(general, filters.month);
+    document.getElementById('reportPreview').innerHTML = `
+      <div class="report-cover">
+        <p class="eyebrow">Informe gerencial</p>
+        <h2>Control de Flota Vehicular</h2>
+        <strong>${escapeHtml(reportContext)}</strong>
+      </div>
+      <div class="report-kpis">
+        ${reportKpiCard(reportMetric.totalLabel, dashboard.summary.kms, reportMetric.unit, 'cyan')}
+        ${reportKpiCard('Galones cargados', dashboard.summary.gallons, 'gal', 'violet')}
+        ${reportKpiCard(reportMetric.perFuelLabel, dashboard.summary.kmPerGallon, reportMetric.perFuelUnit, 'green')}
+        ${reportKpiCard('Disponibilidad', dashboard.summary.availability, '%', 'amber')}
+        ${reportKpiCard('Disponibilidad operativa', dashboard.summary.operationalAvailability, '%', 'cyan')}
+        ${reportKpiCard('MTBF', dashboard.summary.mtbf, 'h', 'blue')}
+        ${reportKpiCard('MTTR', dashboard.summary.mttr, 'h', 'orange')}
+        ${reportKpiCard('Preventivos', dashboard.summary.preventive, 'und', 'teal')}
+        ${reportKpiCard('Correctivos', dashboard.summary.corrective, 'und', 'red')}
+      </div>
+      <div class="report-section">
+        <div class="panel-head"><h3>Dashboard ejecutivo</h3><span class="badge">Graficos del periodo</span></div>
+        <div class="report-chart-grid">
+          ${reportBars(reportMetric.totalLabel, dashboard.chartSeries, 'kms', reportMetric.unit, '#39d2ff')}
+          ${reportBars('Galones cargados', dashboard.chartSeries, 'gallons', 'gal', '#8f7cff')}
+          ${reportBars('Tiempo medio entre fallas (MTBF)', dashboard.chartSeries, 'mtbf', 'h', '#39d2ff')}
+          ${reportBars('Tiempo medio entre Reparacion (MTTR)', dashboard.chartSeries, 'mttr', 'h', '#ffb020')}
+          ${reportBars('Disponibilidad', dashboard.chartSeries, 'availability', '%', '#1fe088')}
+          ${reportBars('Disponibilidad operativa', dashboard.chartSeries, 'operationalAvailability', '%', '#39d2ff')}
+          ${reportBars(reportMetric.perMaintenanceLabel, dashboard.chartSeries, 'kmPerMaintenance', reportMetric.perMaintenanceUnit, '#ffb020')}
+        </div>
+      </div>
+      <div class="report-section">
+        <div class="panel-head"><h3>Reporte General</h3><span class="badge">${escapeHtml(filters.month ? monthName(filters.month) : 'Totales del ano')}</span></div>
+        <div class="report-general-grid">
+          ${selectedGeneralTables.map(reportGeneralBlock).join('')}
+        </div>
+      </div>
+      <div class="report-section">
+        <div class="panel-head"><h3>Alertas</h3><span class="badge">${fmt(alertRows.length)} unidades</span></div>
+        ${reportAlertSummary(alertRows)}
+      </div>
+      <div class="report-section">
+        <div class="panel-head"><h3>Mantenimientos</h3><span class="badge">${fmt(maintenanceRows.length)} registros</span></div>
+        ${reportMaintenanceSummary(maintenanceRows)}
+      </div>
+    `;
+  }
+
+  function reportKpiCard(label, value, unit, tone) {
+    return `<div class="report-kpi ${tone}"><span>${label}</span><strong>${fmt(value)}</strong><small>${unit}</small></div>`;
+  }
+
+  function reportBars(title, series, key, unit, color) {
+    const max = Math.max(...series.map((item) => Number(item[key]) || 0), 1);
+    return `
+      <div class="report-chart">
+        <h4>${escapeHtml(title)}</h4>
+        ${series.map((item) => {
+          const value = Number(item[key]) || 0;
+          return `<div class="report-bar-row"><span>${escapeHtml(item.month)}</span><i><b style="width:${Math.min(100, (value / max) * 100)}%;background:${color}"></b></i><strong>${fmt(value)} ${unit}</strong></div>`;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  function buildReportGeneralTables(general, selectedMonth) {
+    const monthIndex = Number(selectedMonth || 0) - 1;
+    return (general.tables || []).map((table) => ({
+      title: table.title,
+      unit: table.unit,
+      rows: (table.rows || []).map((row) => ({
+        plate: row.plate,
+        type: row.type,
+        value: monthIndex >= 0 ? row.values[monthIndex] : row.total
+      })).sort((a, b) => Number(b.value || 0) - Number(a.value || 0)).slice(0, 8)
+    }));
+  }
+
+  function reportGeneralBlock(table) {
+    return `
+      <div class="report-mini-table">
+        <h4>${escapeHtml(table.title)}</h4>
+        <table>
+          <thead><tr><th>Placa</th><th>Tipo</th><th>${escapeHtml(table.unit)}</th></tr></thead>
+          <tbody>${table.rows.map((row) => `<tr><td>${escapeHtml(row.plate)}</td><td>${escapeHtml(row.type || '')}</td><td>${fmt(row.value)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function reportAlertSummary(alerts) {
+    const counts = alerts.reduce((acc, row) => {
+      acc[row.severity] = (acc[row.severity] || 0) + 1;
+      return acc;
+    }, { ok: 0, warning: 0, critical: 0 });
+    return `
+      <div class="report-alert-grid">
+        <div class="report-alert critical"><span>Urgentes</span><strong>${fmt(counts.critical)}</strong></div>
+        <div class="report-alert warning"><span>Proximas</span><strong>${fmt(counts.warning)}</strong></div>
+        <div class="report-alert ok"><span>En rango</span><strong>${fmt(counts.ok)}</strong></div>
+      </div>
+      <div class="report-alert-list">
+        ${alerts.slice(0, 10).map((row) => `<div><strong>${escapeHtml(row.plate)}</strong><span>${escapeHtml(row.message)} · ${fmt(row.kmToMaintenance)} km</span></div>`).join('') || '<p class="muted">Sin alertas para los filtros actuales.</p>'}
+      </div>
+    `;
+  }
+
+  function reportMaintenanceSummary(rows) {
+    const preventive = rows.filter((row) => norm(row.type).includes('prevent')).length;
+    const corrective = rows.filter((row) => norm(row.type).includes('correct')).length;
+    return `
+      <div class="report-maintenance-kpis">
+        <div><span>Total</span><strong>${fmt(rows.length)}</strong></div>
+        <div><span>Preventivos</span><strong>${fmt(preventive)}</strong></div>
+        <div><span>Correctivos</span><strong>${fmt(corrective)}</strong></div>
+      </div>
+      <table class="report-maintenance-table">
+        <thead><tr><th>Fecha</th><th>Placa</th><th>Taller</th><th>Tipo</th><th>Km/Horas</th><th>Orden</th></tr></thead>
+        <tbody>${rows.slice(0, 12).map((row) => `<tr><td>${formatDateShort(row.entryDate)}</td><td>${escapeHtml(row.plate || '')}</td><td>${escapeHtml(row.workshop || '')}</td><td>${escapeHtml(row.type || '')}</td><td>${fmt(row.odometer)}</td><td>${escapeHtml(row.orderNumber || '')}</td></tr>`).join('')}</tbody>
+      </table>
+    `;
+  }
+
+  async function renderRecentTable(key, id) {
+    const data = await runServer('getTableData', { key, filters: readFilters() });
+    const rows = data.rows;
+    const preferred = key === 'routes'
+      ? ['startDate', 'endDate', 'plate', 'kmStart', 'kmEnd', 'kms', 'hours', 'gallons', 'observations']
+      : ['entryDate', 'exitDate', 'plate', 'workshop', 'type', 'odometer', 'package', 'mechanic'];
+    renderObjectTable(id, rows, preferred);
+  }
+
+  async function renderRoutesTable() {
+    const data = await runServer('getTableData', { key: 'routes', filters: readFilters() });
+    const rows = data.rows || [];
+    state.routeDeletes = {};
+    updateRouteDeleteButton();
+    document.getElementById('routesTable').innerHTML = `
+      <thead>
+        <tr>
+          <th>Fecha de Inicio</th>
+          <th>Fecha Final</th>
+          <th>Placa</th>
+          <th>Km / Horas inicial</th>
+          <th>Km / Horas final</th>
+          <th>Total de Km / Horas</th>
+          <th>Horas trabajadas</th>
+          <th>Galones cargados</th>
+          <th>Observaciones</th>
+          <th>Accion</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.length ? rows.map((row) => `
+          <tr data-route-row="${escapeHtml(row._row || '')}">
+            <td>${formatDateShort(row.startDate)}</td>
+            <td>${formatDateShort(row.endDate)}</td>
+            <td class="route-plate">${escapeHtml(row.plate || '')}</td>
+            <td>${fmt(row.kmStart)}</td>
+            <td>${fmt(row.kmEnd)}</td>
+            <td>${fmt(row.kms)}</td>
+            <td>${fmt(row.hours)}</td>
+            <td>${fmt(row.gallons)}</td>
+            <td>${escapeHtml(row.observations || '')}</td>
+            <td><button type="button" class="mini-button danger" data-route-delete="${escapeHtml(row._row || '')}">Borrar</button></td>
+          </tr>
+        `).join('') : '<tr><td colspan="10" class="empty-cell">No hay rutas para los filtros seleccionados.</td></tr>'}
+      </tbody>
+    `;
+    document.querySelectorAll('[data-route-delete]').forEach((button) => {
+      button.addEventListener('click', () => markRouteDelete(button.dataset.routeDelete, button));
+    });
+  }
+
+  async function renderMaintenanceTable() {
+    const filters = readFilters();
+    const data = await runServer('getTableData', { key: 'maintenance', filters });
+    const rows = data.rows || [];
+    const metric = metricForPlate(filters.plate);
+    const preventive = rows.filter((row) => norm(row.type).includes('prevent')).length;
+    const corrective = rows.filter((row) => norm(row.type).includes('correct')).length;
+    const preventiveHours = rows.reduce((sum, row) => sum + maintenanceHoursByType(row, 'preventive'), 0);
+    const correctiveHours = rows.reduce((sum, row) => sum + maintenanceHoursByType(row, 'corrective'), 0);
+    const context = [
+      filters.year ? `Ano ${filters.year}` : '',
+      filters.month ? monthName(filters.month) : 'Todo el ano',
+      filters.project ? `Proyecto ${filters.project}` : 'Todos los proyectos',
+      filters.plate ? `Placa ${filters.plate}` : 'Todas las placas'
+    ].filter(Boolean).join(' · ');
+
+    document.getElementById('maintenanceTableContext').textContent = context;
+    document.getElementById('maintenanceCountBadge').textContent = `${fmt(rows.length)} registros`;
+    document.getElementById('maintenanceSummary').innerHTML = `
+      <div class="maintenance-card total"><span>Total mantenimientos</span><strong>${fmt(rows.length)}</strong><small>${escapeHtml(context)}</small></div>
+      <div class="maintenance-card preventive"><span>Preventivos</span><strong>${fmt(preventive)}</strong><small>Servicios planificados</small></div>
+      <div class="maintenance-card corrective"><span>Correctivos</span><strong>${fmt(corrective)}</strong><small>Atenciones por falla</small></div>
+      <div class="maintenance-card time">
+        <span>Tiempos por mantenimientos</span>
+        <div class="maintenance-time-split">
+          <div><small>Preventivo</small><strong>${fmt(preventiveHours)}</strong><em>horas</em></div>
+          <div><small>Correctivo</small><strong>${fmt(correctiveHours)}</strong><em>horas</em></div>
+        </div>
+      </div>
+    `;
+    document.getElementById('maintenanceTable').innerHTML = `
+      <thead>
+        <tr>
+          <th class="m-col-date">Fecha de entrada</th>
+          <th class="m-col-date">Fecha de salida</th>
+          <th class="m-col-plate">Placa</th>
+          <th class="m-col-workshop">Taller</th>
+          <th class="m-col-type">Tipo</th>
+          <th class="m-col-time">Tiempo por<br>Mantenimiento<br>Preventivo</th>
+          <th class="m-col-time">Tiempo por<br>Mantenimiento<br>Correctivo</th>
+          <th class="m-col-km">${metric.isHourBased ? 'Horas' : 'Kilometraje'}</th>
+          <th class="m-col-km">${metric.isHourBased ? 'Horas entre mantenimiento' : 'Km entre mantenimiento'}</th>
+          <th class="m-col-package">Paquete</th>
+          <th class="m-col-order">Numero de orden</th>
+          <th class="m-col-cost">Costo mantenimiento</th>
+          <th class="m-col-mechanic">Mecanico</th>
+          <th class="m-col-observations">Observaciones</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.length ? rows.map((row) => `
+          <tr class="${norm(row.type).includes('correct') ? 'maintenance-corrective' : 'maintenance-preventive'}">
+            <td>${formatDateShort(row.entryDate)}</td>
+            <td>${formatDateShort(row.exitDate)}</td>
+            <td class="maintenance-plate">${escapeHtml(row.plate || '')}</td>
+            <td>${escapeHtml(row.workshop || '')}</td>
+            <td><span class="maintenance-type">${escapeHtml(row.type || '')}</span></td>
+            <td>${fmt(maintenanceHoursByType(row, 'preventive'))} h</td>
+            <td>${fmt(maintenanceHoursByType(row, 'corrective'))} h</td>
+            <td>${fmt(row.odometer)} ${metric.unit}</td>
+            <td>${fmt(row.kmBetween)} ${metric.unit}</td>
+            <td>${escapeHtml(row.package || '')}</td>
+            <td>${escapeHtml(row.orderNumber || '')}</td>
+            <td>${money(row.cost)}</td>
+            <td>${escapeHtml(row.mechanic || '')}</td>
+            <td class="maintenance-observations">${escapeHtml(row.observations || row.cause || '')}</td>
+          </tr>
+        `).join('') : '<tr><td colspan="14" class="empty-cell">No hay mantenimientos para los filtros seleccionados.</td></tr>'}
+      </tbody>
+    `;
+  }
+
+  function maintenanceHoursByType(row, kind) {
+    const type = norm(row.type);
+    const isCorrective = type.includes('correct');
+    const isPreventive = type.includes('prevent') || type.includes('prev');
+    if (kind === 'corrective' && !isCorrective) return 0;
+    if (kind === 'preventive' && (!isPreventive || isCorrective)) return 0;
+    const explicit = kind === 'corrective' ? Number(row.correctiveTime || 0) : Number(row.preventiveTime || 0);
+    if (explicit) return explicit;
+    const entry = row.entryDate ? new Date(row.entryDate) : null;
+    const exit = row.exitDate ? new Date(row.exitDate) : null;
+    if (entry && exit && Number.isFinite(entry.getTime()) && Number.isFinite(exit.getTime())) {
+      return Math.max(0, (exit.getTime() - entry.getTime()) / 3600000);
+    }
+    return 0;
+  }
+
+  function renderFleetTable() {
+    const projects = state.bootstrap.projects;
+    const filters = readFilters();
+    const rows = filterFleetRows(state.bootstrap.vehicles, filters);
+    const projectCounts = countVehiclesByProject(state.bootstrap.vehicles, filters);
+    renderFleetProjectCards(projectCounts, filters.project);
+    const context = [
+      filters.year ? `Ano operativo ${filters.year}` : '',
+      filters.project ? `Proyecto ${filters.project}` : 'Todos los proyectos',
+      filters.plate ? `Placa ${filters.plate}` : ''
+    ].filter(Boolean).join(' · ');
+    document.getElementById('fleetTableContext').textContent = context || 'Sin filtros activos.';
+    document.getElementById('fleetCountBadge').textContent = `${fmt(rows.length)} vehiculos`;
+    document.getElementById('fleetTable').innerHTML = `
+      <thead>
+        <tr>
+          <th>Placa</th>
+          <th>Proyecto</th>
+          <th>Tipo</th>
+          <th>Marca</th>
+          <th>Modelo</th>
+          <th>Serie motor</th>
+          <th>Serie chasis</th>
+          <th>Ano</th>
+          <th>Color</th>
+          <th>Ciclo motor</th>
+          <th>Ciclo caja</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.length ? rows.map((row) => `
+          <tr>
+            <td class="fleet-plate">${escapeHtml(row.plate)}</td>
+            <td>
+              <div class="fleet-project-editor">
+                <select data-project-editor="${escapeHtml(row.plate)}">
+                  ${projects.map((project) => `<option value="${escapeHtml(project)}" ${norm(project) === norm(row.project) ? 'selected' : ''}>${escapeHtml(project)}</option>`).join('')}
+                </select>
+                <button type="button" class="mini-button" data-mark-project="${escapeHtml(row.plate)}">Editar</button>
+              </div>
+            </td>
+            <td>${escapeHtml(row.type || '')}</td>
+            <td>${escapeHtml(row.brand || '')}</td>
+            <td>${escapeHtml(row.model || '')}</td>
+            <td>${escapeHtml(row.motorSerial || '')}</td>
+            <td>${escapeHtml(row.chassisSerial || '')}</td>
+            <td>${escapeHtml(row.year || '')}</td>
+            <td>${escapeHtml(row.color || '')}</td>
+            <td>${fmt(row.motorCycleKm)} km</td>
+            <td>${fmt(row.boxCycleKm)} km</td>
+          </tr>
+        `).join('') : '<tr><td colspan="11" class="empty-cell">No hay vehiculos para los filtros seleccionados.</td></tr>'}
+      </tbody>
+    `;
+    document.querySelectorAll('[data-project-editor]').forEach((select) => {
+      select.addEventListener('change', () => markFleetProjectChange(select.dataset.projectEditor, select.value, select));
+    });
+    document.querySelectorAll('[data-mark-project]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const select = document.querySelector(`[data-project-editor="${cssEscape(button.dataset.markProject)}"]`);
+        if (select) {
+          select.focus();
+          select.classList.add('pending-edit');
+        }
+      });
+    });
+    updateFleetSaveButton();
+  }
+
+  function filterFleetRows(vehicles, filters) {
+    return vehicles.filter((row) => {
+      if (filters.project && norm(row.project) !== norm(filters.project)) return false;
+      if (filters.plate && norm(row.plate) !== norm(filters.plate)) return false;
+      return true;
+    });
+  }
+
+  function countVehiclesByProject(vehicles, filters) {
+    return vehicles.reduce((acc, row) => {
+      if (filters.plate && norm(row.plate) !== norm(filters.plate)) return acc;
+      const project = row.project || 'Sin proyecto';
+      acc[project] = (acc[project] || 0) + 1;
+      return acc;
+    }, {});
+  }
+
+  function renderFleetProjectCards(counts, activeProject) {
+    const colors = ['cyan', 'violet', 'green', 'amber', 'red', 'teal'];
+    const projects = Object.keys(counts).sort();
+    document.getElementById('fleetProjectCards').innerHTML = projects.length ? projects.map((project, index) => `
+      <button type="button" class="fleet-project-card ${colors[index % colors.length]} ${norm(project) === norm(activeProject) ? 'active' : ''}" data-fleet-project-filter="${escapeHtml(project)}">
+        <span>${escapeHtml(project)}</span>
+        <strong>${fmt(counts[project])}</strong>
+        <small>vehiculos registrados</small>
+      </button>
+    `).join('') : '<div class="panel muted">Todavia no hay vehiculos registrados.</div>';
+    document.querySelectorAll('[data-fleet-project-filter]').forEach((card) => {
+      card.addEventListener('click', async () => {
+        document.getElementById('projectFilter').value = card.dataset.fleetProjectFilter;
+        applyProjectTheme();
+        updateVehicleSelects();
+        await refreshCurrent();
+      });
+    });
+  }
+
+  function openContextImportModal() {
+    if (state.activeTab === 'routes') {
+      openRouteImportModal();
+      return;
+    }
+    if (state.activeTab === 'maintenance') {
+      openMaintenanceImportModal();
+      return;
+    }
+    openFleetImportModal();
+  }
+
+  function markFleetProjectChange(plate, project, select) {
+    state.fleetProjectChanges[plate] = project;
+    if (select) select.classList.add('pending-edit');
+    updateFleetSaveButton();
+  }
+
+  function updateFleetSaveButton() {
+    const button = document.getElementById('saveFleetProjectsBtn');
+    if (!button) return;
+    const count = Object.keys(state.fleetProjectChanges).length;
+    button.disabled = count === 0;
+    button.textContent = count ? `Guardar cambios (${count})` : 'Guardar cambios';
+  }
+
+  async function saveFleetProjectChanges() {
+    const changes = Object.keys(state.fleetProjectChanges).map((plate) => ({
+      plate,
+      project: state.fleetProjectChanges[plate]
+    }));
+    if (!changes.length) return;
+    showLoading(true);
+    try {
+      const result = await runServer('updateVehicleProjects', { rows: changes });
+      notify(`${result.updated} proyectos actualizados.`);
+      state.fleetProjectChanges = {};
+      state.bootstrap = await runServer('getBootstrapData');
+      fillFilters();
+      updateVehicleSelects();
+      await refreshCurrent();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+      updateFleetSaveButton();
+    }
+  }
+
+  async function cleanFleetDuplicates() {
+    if (!confirm('Se eliminaran placas repetidas en Flota Vehicular y se conservara la fila mas reciente de cada placa. Deseas continuar?')) return;
+    showLoading(true);
+    try {
+      const result = await runServer('deduplicateFleetVehicles');
+      notify(`Duplicados eliminados: ${result.deleted}.`);
+      state.bootstrap = await runServer('getBootstrapData');
+      fillFilters();
+      updateVehicleSelects();
+      await refreshCurrent();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  async function cleanMaintenanceDuplicates() {
+    if (!confirm('Se eliminaran mantenimientos duplicados y se conservara la fila mas reciente de cada registro repetido. Deseas continuar?')) return;
+    showLoading(true);
+    try {
+      const result = await runServer('deduplicateMaintenanceRecords');
+      notify(`Mantenimientos duplicados eliminados: ${result.deleted}.`);
+      await refreshCurrent();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  async function cleanRouteDuplicates() {
+    if (!confirm('Se eliminaran rutas duplicadas y se conservara la fila mas reciente de cada registro repetido. Deseas continuar?')) return;
+    showLoading(true);
+    try {
+      const result = await runServer('deduplicateRouteRecords');
+      notify(`Rutas duplicadas eliminadas: ${result.deleted}.`);
+      state.routeDeletes = {};
+      await refreshCurrent();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  function markRouteDelete(rowNumber, button) {
+    if (!rowNumber) return;
+    const row = button.closest('tr');
+    if (state.routeDeletes[rowNumber]) {
+      delete state.routeDeletes[rowNumber];
+      button.textContent = 'Borrar';
+      if (row) row.classList.remove('pending-delete');
+    } else {
+      state.routeDeletes[rowNumber] = true;
+      button.textContent = 'Deshacer';
+      if (row) row.classList.add('pending-delete');
+    }
+    updateRouteDeleteButton();
+  }
+
+  function updateRouteDeleteButton() {
+    const button = document.getElementById('saveRouteDeletesBtn');
+    if (!button) return;
+    const count = Object.keys(state.routeDeletes).length;
+    button.disabled = count === 0;
+    button.textContent = count ? `Guardar cambios (${count})` : 'Guardar cambios';
+  }
+
+  async function saveRouteDeletes() {
+    const rows = Object.keys(state.routeDeletes).map(Number).filter(Boolean);
+    if (!rows.length) return;
+    if (!confirm(`Se eliminaran ${rows.length} rutas marcadas. Deseas continuar?`)) return;
+    showLoading(true);
+    try {
+      const result = await runServer('deleteRouteRows', { rows });
+      notify(`Rutas eliminadas: ${result.deleted}.`);
+      state.routeDeletes = {};
+      await refreshCurrent();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+      updateRouteDeleteButton();
+    }
+  }
+
+  async function saveVehicleProject(plate) {
+    const select = document.querySelector(`[data-project-editor="${cssEscape(plate)}"]`);
+    if (!select) return;
+    showLoading(true);
+    try {
+      await runServer('updateVehicleProject', { plate, project: select.value });
+      notify(`Proyecto actualizado para ${plate}.`);
+      state.bootstrap = await runServer('getBootstrapData');
+      fillFilters();
+      updateVehicleSelects();
+      await refreshCurrent();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  function renderObjectTable(id, rows, keys) {
+    document.getElementById(id).innerHTML = `
+      <thead><tr>${keys.map((k) => `<th>${labelFor(k)}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map((row) => `<tr>${keys.map((k) => `<td>${formatCell(row[k])}</td>`).join('')}</tr>`).join('')}</tbody>
+    `;
+  }
+
+  async function submitRoute(event) {
+    event.preventDefault();
+    updateRouteTotalKm();
+    await submitForm(event.target, 'saveRoute', 'Ruta guardada.');
+  }
+
+  function updateRouteTotalKm() {
+    const form = document.getElementById('routeForm');
+    if (!form) return;
+    const start = parseDecimal(form.elements.kmStart.value);
+    const end = parseDecimal(form.elements.kmEnd.value);
+    if (end >= start && (start || end)) form.elements.kms.value = Math.max(0, end - start);
+  }
+
+  async function submitMaintenance(event) {
+    event.preventDefault();
+    await submitForm(event.target, 'saveMaintenance', 'Mantenimiento guardado.');
+    fillPackageOptions();
+  }
+
+  async function submitFleet(event) {
+    event.preventDefault();
+    await submitForm(event.target, 'saveVehicle', 'Vehiculo guardado.');
+    state.bootstrap = await runServer('getBootstrapData');
+    fillFilters();
+    updateVehicleSelects();
+    renderFleetTable();
+  }
+
+  function openFleetImportModal() {
+    document.getElementById('fleetImportModal').classList.remove('hidden');
+    document.getElementById('fleetImportResult').innerHTML = '';
+  }
+
+  function closeFleetImportModal() {
+    document.getElementById('fleetImportModal').classList.add('hidden');
+  }
+
+  function openMaintenanceImportModal() {
+    document.getElementById('maintenanceImportModal').classList.remove('hidden');
+    document.getElementById('maintenanceImportResult').innerHTML = '';
+    fillPackageOptions();
+  }
+
+  function closeMaintenanceImportModal() {
+    document.getElementById('maintenanceImportModal').classList.add('hidden');
+  }
+
+  function openRouteImportModal() {
+    document.getElementById('routeImportModal').classList.remove('hidden');
+    document.getElementById('routeImportResult').innerHTML = '';
+  }
+
+  function closeRouteImportModal() {
+    document.getElementById('routeImportModal').classList.add('hidden');
+  }
+
+  async function importFleetCsvText() {
+    const csv = document.getElementById('fleetCsvImport').value.trim();
+    if (!csv) return notify('Pega los datos CSV de la flota.', true);
+    const rows = fleetRowsFromMatrix(parseCsvMatrix(csv));
+    await importFleetRows(rows, 'CSV pegado');
+    document.getElementById('fleetCsvImport').value = '';
+  }
+
+  async function importFleetFile() {
+    const file = document.getElementById('fleetImportFile').files[0];
+    if (!file) return notify('Selecciona un archivo Excel o CSV.', true);
+    try {
+      let matrix;
+      if (/\.csv$|\.txt$/i.test(file.name)) {
+        matrix = parseCsvMatrix(await file.text());
+      } else {
+        if (typeof XLSX === 'undefined') throw new Error('No se cargo la libreria para leer Excel. Intenta guardar el archivo como CSV.');
+        const buffer = await file.arrayBuffer();
+        const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+        matrix = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '', raw: false, dateNF: 'yyyy-mm-dd' });
+      }
+      const rows = fleetRowsFromMatrix(matrix);
+      await importFleetRows(rows, file.name);
+      document.getElementById('fleetImportFile').value = '';
+    } catch (err) {
+      notify(err.message || err, true);
+    }
+  }
+
+  async function importFleetRows(rows, sourceLabel) {
+    rows = rows.filter((row) => row.plate);
+    if (!rows.length) return notify('No encontre vehiculos validos para importar.', true);
+    showLoading(true);
+    try {
+      const result = await runServer('importRows', { key: 'fleet', rows });
+      const skippedText = result.skipped ? ` ${fmt(result.skipped)} duplicados no se importaron.` : '';
+      document.getElementById('fleetImportResult').innerHTML = `${fmt(result.inserted)} vehiculos registrados desde ${escapeHtml(sourceLabel)}.${skippedText}`;
+      notify(`${result.inserted} vehiculos registrados.${skippedText}`);
+      state.bootstrap = await runServer('getBootstrapData');
+      fillFilters();
+      updateVehicleSelects();
+      await refreshCurrent();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  async function importMaintenanceCsvText() {
+    const csv = document.getElementById('maintenanceCsvImport').value.trim();
+    if (!csv) return notify('Pega los datos CSV de mantenimiento.', true);
+    const rows = maintenanceRowsFromMatrix(parseCsvMatrix(csv));
+    await importMaintenanceRows(rows, 'CSV pegado');
+    document.getElementById('maintenanceCsvImport').value = '';
+  }
+
+  async function importMaintenanceFile() {
+    const file = document.getElementById('maintenanceImportFile').files[0];
+    if (!file) return notify('Selecciona un archivo Excel o CSV.', true);
+    try {
+      let matrix;
+      if (/\.csv$|\.txt$/i.test(file.name)) {
+        matrix = parseCsvMatrix(await file.text());
+      } else {
+        if (typeof XLSX === 'undefined') throw new Error('No se cargo la libreria para leer Excel. Intenta guardar el archivo como CSV.');
+        const buffer = await file.arrayBuffer();
+        const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+        matrix = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '', raw: false, dateNF: 'yyyy-mm-dd' });
+      }
+      const rows = maintenanceRowsFromMatrix(matrix);
+      await importMaintenanceRows(rows, file.name);
+      document.getElementById('maintenanceImportFile').value = '';
+    } catch (err) {
+      notify(err.message || err, true);
+    }
+  }
+
+  async function importMaintenanceRows(rows, sourceLabel) {
+    rows = rows.filter((row) => row.plate);
+    if (!rows.length) return notify('No encontre mantenimientos validos para importar.', true);
+    showLoading(true);
+    try {
+      const result = await runServer('importRows', { key: 'maintenance', rows });
+      document.getElementById('maintenanceImportResult').innerHTML = `${fmt(result.inserted)} mantenimientos registrados desde ${escapeHtml(sourceLabel)}.`;
+      notify(`${result.inserted} mantenimientos registrados.`);
+      await refreshCurrent();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  async function importRouteCsvText() {
+    const csv = document.getElementById('routeCsvImport').value.trim();
+    if (!csv) return notify('Pega los datos CSV de rutas.', true);
+    const rows = routeRowsFromMatrix(parseCsvMatrix(csv));
+    await importRouteRows(rows, 'CSV pegado');
+    document.getElementById('routeCsvImport').value = '';
+  }
+
+  async function importRouteFile() {
+    const file = document.getElementById('routeImportFile').files[0];
+    if (!file) return notify('Selecciona un archivo Excel o CSV.', true);
+    try {
+      let matrix;
+      if (/\.csv$|\.txt$/i.test(file.name)) {
+        matrix = parseCsvMatrix(await file.text());
+      } else {
+        if (typeof XLSX === 'undefined') throw new Error('No se cargo la libreria para leer Excel. Intenta guardar el archivo como CSV.');
+        const buffer = await file.arrayBuffer();
+        const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+        matrix = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '', raw: false, dateNF: 'yyyy-mm-dd' });
+      }
+      const rows = routeRowsFromMatrix(matrix);
+      await importRouteRows(rows, file.name);
+      document.getElementById('routeImportFile').value = '';
+    } catch (err) {
+      notify(err.message || err, true);
+    }
+  }
+
+  async function importRouteRows(rows, sourceLabel) {
+    rows = rows.filter((row) => row.plate);
+    if (!rows.length) return notify('No encontre rutas validas para importar.', true);
+    showLoading(true);
+    try {
+      const result = await runServer('importRows', { key: 'routes', rows });
+      document.getElementById('routeImportResult').innerHTML = `${fmt(result.inserted)} rutas registradas desde ${escapeHtml(sourceLabel)}.`;
+      notify(`${result.inserted} rutas registradas.`);
+      await refreshCurrent();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  function routeRowsFromMatrix(matrix) {
+    const clean = matrix
+      .map((row) => row.map((cell) => String(cell == null ? '' : cell).trim()))
+      .filter((row) => row.some(Boolean));
+    if (!clean.length) return [];
+    const first = clean[0].map(norm);
+    const hasHeader = first.some((cell) => ['fechainicio', 'fechadeinicio', 'fechafinal', 'placa', 'kminicial', 'kmfinal'].indexOf(cell) >= 0);
+    if (hasHeader) {
+      const headers = clean.shift();
+      return clean.map((row) => {
+        const obj = {};
+        headers.forEach((header, index) => {
+          const field = routeFieldFromHeader(header);
+          if (field) obj[field] = row[index] || '';
+        });
+        normalizeDecimalFields(obj, ['kmStart', 'kmEnd', 'kms', 'hours', 'gallons']);
+        if (!obj.kms) obj.kms = Math.max(0, Number(obj.kmEnd || 0) - Number(obj.kmStart || 0));
+        return obj;
+      });
+    }
+    return clean.map((row) => {
+      const obj = Object.fromEntries(ROUTE_IMPORT_ORDER.map((field, index) => [field, row[index] || '']));
+      normalizeDecimalFields(obj, ['kmStart', 'kmEnd', 'kms', 'hours', 'gallons']);
+      if (!obj.kms) obj.kms = Math.max(0, Number(obj.kmEnd || 0) - Number(obj.kmStart || 0));
+      return obj;
+    });
+  }
+
+  function routeFieldFromHeader(header) {
+    const key = norm(header);
+    const aliases = {
+      fechainicio: 'startDate',
+      fechadeinicio: 'startDate',
+      fechafinal: 'endDate',
+      fechafin: 'endDate',
+      fechadefin: 'endDate',
+      placa: 'plate',
+      codigoequipo: 'plate',
+      kminicial: 'kmStart',
+      kilometrajeinicial: 'kmStart',
+      kmfinal: 'kmEnd',
+      kilometrajefinal: 'kmEnd',
+      totalkilometrosrecorridos: 'kms',
+      totaldekilometrosrecorridos: 'kms',
+      totaldekms: 'kms',
+      kmsrecorridos: 'kms',
+      horastrabajadas: 'hours',
+      horasdeoperacion: 'hours',
+      cantidaddegalonescargados: 'gallons',
+      galonescargados: 'gallons',
+      galones: 'gallons',
+      observaciones: 'observations'
+    };
+    return aliases[key] || '';
+  }
+
+  function maintenanceRowsFromMatrix(matrix) {
+    const clean = matrix
+      .map((row) => row.map((cell) => String(cell == null ? '' : cell).trim()))
+      .filter((row) => row.some(Boolean));
+    if (!clean.length) return [];
+    const first = clean[0].map(norm);
+    const hasHeader = first.some((cell) => ['placa', 'taller', 'fechadeentrada', 'fechaentrada', 'tipo', 'kilometraje'].indexOf(cell) >= 0);
+    if (hasHeader) {
+      const headers = clean.shift();
+      return clean.map((row) => {
+        const obj = {};
+        headers.forEach((header, index) => {
+          const field = maintenanceFieldFromHeader(header);
+          if (field) obj[field] = row[index] || '';
+        });
+        return obj;
+      });
+    }
+    return clean.map((row) => Object.fromEntries(MAINTENANCE_IMPORT_ORDER.map((field, index) => [field, row[index] || ''])));
+  }
+
+  function maintenanceFieldFromHeader(header) {
+    const key = norm(header);
+    const aliases = {
+      placa: 'plate',
+      codigoequipo: 'plate',
+      taller: 'workshop',
+      mecanica: 'workshop',
+      fechaentrada: 'entryDate',
+      fechadeentrada: 'entryDate',
+      fechaingreso: 'entryDate',
+      fechasalida: 'exitDate',
+      fechadesalida: 'exitDate',
+      tipo: 'type',
+      tipomantenimiento: 'type',
+      kilometraje: 'odometer',
+      kmingreso: 'odometer',
+      kilometrajeentre: 'kmBetween',
+      kilometrajeentremantenimiento: 'kmBetween',
+      kmentremto: 'kmBetween',
+      kmentremantenimiento: 'kmBetween',
+      paquete: 'package',
+      paquetedemantenimiento: 'package',
+      servicio: 'package',
+      numerodeorden: 'orderNumber',
+      nroorden: 'orderNumber',
+      nrodeorden: 'orderNumber',
+      nodeorden: 'orderNumber',
+      costo: 'cost',
+      costos: 'cost',
+      costomantenimiento: 'cost',
+      costopormantenimiento: 'cost',
+      costototal: 'cost',
+      costototalmantenimiento: 'cost',
+      costototalusd: 'cost',
+      mecanico: 'mechanic',
+      nombredelmecanico: 'mechanic',
+      responsable: 'mechanic',
+      tiempopreventivo: 'preventiveTime',
+      tiempomtopreventivo: 'preventiveTime',
+      tiempomantenimientopreventivo: 'preventiveTime',
+      tiempocorrectivo: 'correctiveTime',
+      tiempomtocorrectivo: 'correctiveTime',
+      tiempomantenimientocorrectivo: 'correctiveTime',
+      observaciones: 'observations'
+    };
+    return aliases[key] || '';
+  }
+
+  function fleetRowsFromMatrix(matrix) {
+    const clean = matrix
+      .map((row) => row.map((cell) => String(cell == null ? '' : cell).trim()))
+      .filter((row) => row.some(Boolean));
+    if (!clean.length) return [];
+    const first = clean[0].map(norm);
+    const hasHeader = first.some((cell) => ['placa', 'placaocodigo', 'placoocodigo', 'codigo', 'proyecto', 'tipo', 'marca'].indexOf(cell) >= 0);
+    if (hasHeader) {
+      const headers = clean.shift();
+      return clean.map((row) => {
+        const obj = {};
+        headers.forEach((header, index) => {
+          const field = fleetFieldFromHeader(header);
+          if (field) obj[field] = row[index] || '';
+        });
+        return obj;
+      });
+    }
+    return clean.map((row) => Object.fromEntries(FLEET_IMPORT_ORDER.map((field, index) => [field, row[index] || ''])));
+  }
+
+  function fleetFieldFromHeader(header) {
+    const key = norm(header);
+    const aliases = {
+      placa: 'plate',
+      placo: 'plate',
+      placoocodigo: 'plate',
+      placaoocodigo: 'plate',
+      placaocodigo: 'plate',
+      codigo: 'plate',
+      codigoequipo: 'plate',
+      proyecto: 'project',
+      tipo: 'type',
+      marca: 'brand',
+      modelo: 'model',
+      seriemotor: 'motorSerial',
+      seriedemotor: 'motorSerial',
+      numeroseriedemotor: 'motorSerial',
+      seriechasis: 'chassisSerial',
+      seriedechasis: 'chassisSerial',
+      numeroseriedechasis: 'chassisSerial',
+      anio: 'year',
+      ano: 'year',
+      color: 'color',
+      ciclomotor: 'motorCycleKm',
+      ciclomantenimientomotor: 'motorCycleKm',
+      ciclomantenimientodelmotorenkm: 'motorCycleKm',
+      ciclodemantenimientodelmotorenkm: 'motorCycleKm',
+      ciclomantenimientomotorenkm: 'motorCycleKm',
+      ciclocaja: 'boxCycleKm',
+      ciclomantenimientocaja: 'boxCycleKm',
+      ciclomantenimientodelacajaenkm: 'boxCycleKm',
+      ciclodemantenimientodelacajaenkm: 'boxCycleKm',
+      ciclomantenimientocajaenkm: 'boxCycleKm'
+    };
+    return aliases[key] || '';
+  }
+
+  async function submitForm(form, serverFn, message) {
+    showLoading(true);
+    try {
+      const payload = Object.fromEntries(new FormData(form).entries());
+      if (serverFn === 'saveRoute') normalizeDecimalFields(payload, ['kmStart', 'kmEnd', 'kms', 'hours', 'gallons']);
+      if (serverFn === 'saveMaintenance') normalizeDecimalFields(payload, ['odometer', 'kmBetween', 'preventiveTime', 'correctiveTime', 'cost']);
+      if (serverFn === 'saveVehicle') normalizeDecimalFields(payload, ['year', 'motorCycleKm', 'boxCycleKm']);
+      if (!payload.project) payload.project = document.getElementById('projectFilter').value;
+      await runServer(serverFn, payload);
+      form.reset();
+      notify(message);
+      await refreshCurrent();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  function fillPackageOptions() {
+    if (!state.bootstrap) return;
+    const type = document.getElementById('maintenanceType').value;
+    const isCorrective = norm(type).includes('correct');
+    const options = isCorrective
+      ? state.bootstrap.correctivePackages
+      : state.bootstrap.preventivePackages;
+    fillSelectElement(document.getElementById('packageSelect'), options);
+    fillSelectElement(document.getElementById('workshopSelect'), state.bootstrap.workshops.length ? state.bootstrap.workshops : ['MECANICA ORIENTOIL']);
+    const preventiveWrap = document.getElementById('maintenancePreventiveTimeWrap');
+    const correctiveWrap = document.getElementById('maintenanceCorrectiveTimeWrap');
+    if (preventiveWrap) preventiveWrap.classList.toggle('hidden', isCorrective);
+    if (correctiveWrap) correctiveWrap.classList.toggle('hidden', !isCorrective);
+  }
+
+  async function createDrivePdf() {
+    showLoading(true);
+    try {
+      const result = await runServer('createExecutivePdf', readFilters());
+      document.getElementById('pdfResult').innerHTML = `<a href="${result.url}" target="_blank">${escapeHtml(result.name)}</a>`;
+      notify('PDF generado en Drive.');
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  async function createAlertsPdf() {
+    showLoading(true);
+    try {
+      const result = await runServer('createAlertsPdf', readAlertFilters());
+      document.getElementById('alertsPdfResult').innerHTML = `<a href="${result.url}" target="_blank">${escapeHtml(result.name)}</a>`;
+      notify('PDF de alertas generado en Drive.');
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  async function importSheet() {
+    showLoading(true);
+    try {
+      const payload = {
+        key: document.getElementById('importKey').value,
+        spreadsheetId: document.getElementById('sourceSpreadsheetId').value.trim(),
+        sheetName: document.getElementById('sourceSheetName').value.trim()
+      };
+      const result = await runServer('importFromSpreadsheet', payload);
+      notify(`Importados ${result.inserted} registros.`);
+      await initApp();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  async function importCsv() {
+    const csv = document.getElementById('csvImport').value.trim();
+    if (!csv) return notify('Pega un CSV con encabezados.', true);
+    showLoading(true);
+    try {
+      const rows = parseCsv(csv);
+      const result = await runServer('importRows', { key: document.getElementById('importKey').value, rows });
+      notify(`Importados ${result.inserted} registros.`);
+      document.getElementById('csvImport').value = '';
+      await initApp();
+    } catch (err) {
+      notify(err.message || err, true);
+    } finally {
+      showLoading(false);
+    }
+  }
+
+  function parseCsv(text) {
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    const rows = lines.map(splitCsvLine);
+    const headers = rows.shift().map((h) => h.trim());
+    return rows.map((r) => Object.fromEntries(headers.map((h, i) => [h, r[i] || ''])));
+  }
+
+  function parseCsvMatrix(text) {
+    return text.split(/\r?\n/).filter(Boolean).map(splitCsvLine);
+  }
+
+  function splitCsvLine(line) {
+    const decimalSentinel = '\u0007';
+    line = line.replace(/(\d),(\d)/g, '$1' + decimalSentinel + '$2');
+    const out = [];
+    let cur = '';
+    let quoted = false;
+    const delimiter = (line.split(';').length > line.split(',').length) ? ';' : ',';
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') quoted = !quoted;
+      else if (ch === delimiter && !quoted) { out.push(cur.replaceAll(decimalSentinel, ',')); cur = ''; }
+      else cur += ch;
+    }
+    out.push(cur.replaceAll(decimalSentinel, ','));
+    return out;
+  }
+
+  function showLoading(show) {
+    document.getElementById('loading').classList.toggle('hidden', !show);
+  }
+
+  function notify(message, error) {
+    const toast = document.getElementById('toast');
+    toast.textContent = message;
+    toast.style.background = error ? '#d64545' : '#14212b';
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 3200);
+  }
+
+  function defaultMetric() {
+    return {
+      isHourBased: false,
+      unit: 'km',
+      totalLabel: 'Km recorridos',
+      totalTitle: 'Kilometros recorridos totales',
+      perFuelLabel: 'Km por galon',
+      perFuelUnit: 'km/gal',
+      perMaintenanceLabel: 'Km por mantenimiento',
+      perMaintenanceUnit: 'km/mto',
+      maintenanceTitle: 'Kilometros por mantenimiento'
+    };
+  }
+
+  function metricForPlate(plate) {
+    const vehicle = vehicleByPlate(plate);
+    const isHourBased = vehicle ? Boolean(vehicle.isHourBased) || isVacuumVehicle(vehicle) : false;
+    if (!isHourBased) return defaultMetric();
+    return {
+      isHourBased: true,
+      unit: 'h',
+      totalLabel: 'Horas trabajadas',
+      totalTitle: 'Horas trabajadas totales',
+      perFuelLabel: 'Horas por galon',
+      perFuelUnit: 'h/gal',
+      perMaintenanceLabel: 'Horas por mantenimiento',
+      perMaintenanceUnit: 'h/mto',
+      maintenanceTitle: 'Horas por mantenimiento'
+    };
+  }
+
+  function vehicleByPlate(plate) {
+    if (!state.bootstrap || !plate) return null;
+    return state.bootstrap.vehicles.find((v) => norm(v.plate) === norm(plate)) || null;
+  }
+
+  function isVacuumVehicle(vehicle) {
+    return norm([vehicle.type, vehicle.brand, vehicle.model, vehicle.plate].filter(Boolean).join(' ')).includes('vacuum')
+      || norm([vehicle.type, vehicle.brand, vehicle.model].filter(Boolean).join(' ')).includes('vacu');
+  }
+
+  function labelFor(key) {
+    return ({
+      startDate: 'Fecha de Inicio', endDate: 'Fecha Final', entryDate: 'Fecha de entrada', exitDate: 'Fecha de salida',
+      plate: 'Placa', kmStart: 'Km / Horas inicial', kmEnd: 'Km / Horas final', kms: 'Total de Km / Horas', hours: 'Horas trabajadas', gallons: 'Cantidad de Galones cargados', observations: 'Observaciones',
+      workshop: 'Taller', type: 'Tipo', odometer: 'Kilometraje / Horas', kmBetween: 'Km / Horas entre mantenimiento', package: 'Paquete', orderNumber: 'Numero de orden', mechanic: 'Mecanico',
+      project: 'Proyecto', brand: 'Marca', model: 'Modelo', year: 'Ano', color: 'Color', motorCycleKm: 'Ciclo'
+    })[key] || key;
+  }
+
+  function formatCell(value) {
+    if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) return new Date(value).toLocaleDateString();
+    return escapeHtml(value == null ? '' : value);
+  }
+
+  function formatDateShort(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return escapeHtml(value);
+    return date.toLocaleDateString('es-EC', { day: '2-digit', month: 'short', year: '2-digit' });
+  }
+
+  function fmt(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return value || '0';
+    return n.toLocaleString('es-EC', { maximumFractionDigits: 2 });
+  }
+
+  function money(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '$0.00';
+    return n.toLocaleString('es-EC', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function parseDecimal(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+    if (value === null || value === undefined || value === '') return 0;
+    const cleaned = String(value).trim().replace(/\s/g, '');
+    const normalized = cleaned.indexOf(',') >= 0 && cleaned.indexOf('.') >= 0
+      ? cleaned.replace(/\./g, '').replace(',', '.')
+      : cleaned.replace(',', '.');
+    const n = Number(normalized.replace(/[^\d.-]/g, ''));
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function normalizeDecimalFields(obj, fields) {
+    fields.forEach((field) => {
+      if (obj[field] !== undefined && obj[field] !== '') obj[field] = String(parseDecimal(obj[field]));
+    });
+    return obj;
+  }
+
+  function norm(value) {
+    return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function cssEscape(value) {
+    if (window.CSS && CSS.escape) return CSS.escape(value);
+    return String(value).replace(/["\\]/g, '\\$&');
+  }
+
+  function debounce(fn, ms) {
+    let timer;
+    return (...args) => {
+      clearTimeout(timer);
+      timer = setTimeout(() => fn(...args), ms);
+    };
+  }
+</script>
