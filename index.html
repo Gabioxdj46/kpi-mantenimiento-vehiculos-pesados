@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://www.gstatic.com/charts/loader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <?!= include('Styles'); ?>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">CF</div>
+          <div>
+            <strong>Flota Vehicular</strong>
+            <span>Operacion y mantenimiento</span>
+          </div>
+        </div>
+        <nav class="tabs" aria-label="Modulos">
+          <button class="tab active" data-tab="dashboard"><span class="tab-icon">📊</span><span>Dashboard</span></button>
+          <button class="tab" data-tab="general"><span class="tab-icon">📈</span><span>Reporte General</span></button>
+          <button class="tab" data-tab="alerts"><span class="tab-icon">⚠</span><span>Alertas</span></button>
+          <button class="tab" data-tab="maintenance"><span class="tab-icon">🛠</span><span>Mantenimientos</span></button>
+          <button class="tab" data-tab="routes"><span class="tab-icon">🧭</span><span>Rutas</span></button>
+          <button class="tab" data-tab="fleet"><span class="tab-icon">🚚</span><span>Flota Vehicular</span></button>
+          <button class="tab" data-tab="reports"><span class="tab-icon">📄</span><span>Informes</span></button>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="topbar-title">
+            <p class="eyebrow">Sistema interno</p>
+            <h1>Control de Flota Vehicular</h1>
+          </div>
+          <div class="actions">
+            <button id="openFleetImportBtn" type="button" title="Registrar o importar datos">Importar</button>
+            <button id="exportPdfBtn" class="primary-button" type="button" title="Exportar la vista actual como PDF">Exportar PDF</button>
+            <button id="printBtn" type="button" title="Imprimir la vista actual">Imprimir</button>
+          </div>
+        </header>
+
+        <section class="filters">
+          <label class="filter-year">
+            Año
+            <select id="yearFilter"></select>
+          </label>
+          <label class="filter-month">
+            Mes
+            <select id="monthFilter"></select>
+          </label>
+          <label class="filter-project">
+            Proyecto
+            <select id="projectFilter"></select>
+          </label>
+          <label class="filter-plate">
+            Placa / codigo
+            <select id="plateFilter"></select>
+          </label>
+        </section>
+
+        <div id="toast" class="toast" role="status"></div>
+        <div id="loading" class="loading hidden">Cargando datos...</div>
+
+        <section id="dashboard" class="view active">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Vista ejecutiva</p>
+              <h2>KPIs individuales y comparativos</h2>
+            </div>
+            <span id="vehicleBadge" class="badge">Sin seleccion</span>
+          </div>
+          <div id="kpiCards" class="kpi-grid"></div>
+          <div class="dashboard-grid">
+            <div class="panel chart-panel"><h3 id="chartTotalKmsTitle">Kilometros recorridos totales</h3><div id="chartTotalKms" class="chart"></div></div>
+            <div class="panel chart-panel"><h3>Galones cargados totales</h3><div id="chartTotalGallons" class="chart"></div></div>
+            <div class="panel chart-panel"><h3>Kilometros por galon por mes</h3><div id="chartKmPerGallon" class="chart"></div></div>
+            <div class="panel chart-panel"><h3>Mantenimientos por mes</h3><div id="chartMaintenance" class="chart"></div></div>
+            <div class="panel chart-panel"><h3>Costos por mantenimiento</h3><div id="chartMaintenanceCosts" class="chart"></div></div>
+            <div class="panel chart-panel"><h3 id="chartKmPerMaintenanceTitle">Kilometros por mantenimiento</h3><div id="chartKmPerMaintenance" class="chart"></div></div>
+            <div class="panel chart-panel"><h3>Tiempo medio entre fallas (MTBF)</h3><div id="chartMtbf" class="chart"></div></div>
+            <div class="panel chart-panel"><h3>Tiempo medio entre Reparacion (MTTR)</h3><div id="chartMttr" class="chart"></div></div>
+            <div class="panel chart-panel wide"><h3>Disponibilidad del equipo</h3><div id="chartAvailability" class="chart"></div></div>
+          </div>
+          <div class="dashboard-grid two">
+            <div class="panel">
+              <div class="panel-head"><h3>Ranking de unidades</h3></div>
+              <div id="rankingList" class="ranking-list"></div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><h3>Alertas de bajo desempeno</h3></div>
+              <div id="alertList" class="alert-list"></div>
+            </div>
+          </div>
+          <div class="panel kpi-table-panel">
+            <div class="panel-head">
+              <h3>Tabla mensual KPI individual</h3>
+            </div>
+            <div class="table-scroll">
+              <table id="monthlyKpiTable" class="data-table"></table>
+            </div>
+          </div>
+        </section>
+
+        <section id="general" class="view">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Reporte por proyecto</p>
+              <h2>Tablas KPI mensuales por vehiculo</h2>
+            </div>
+          </div>
+          <div id="generalTables" class="metric-tables"></div>
+        </section>
+
+        <section id="routes" class="view">
+          <div class="section-head">
+            <div><p class="eyebrow">Operacion</p><h2>Rutas y lecturas operativas</h2></div>
+            <div class="actions routes-actions">
+              <button id="dedupeRoutesBtn" type="button">Limpiar duplicados</button>
+              <button id="saveRouteDeletesBtn" class="primary-button" type="button" disabled>Guardar cambios</button>
+            </div>
+          </div>
+          <div class="panel routes-panel">
+            <div class="panel-head routes-panel-head">
+              <div>
+                <h3>Rutas registradas</h3>
+                <p class="muted">Los filtros superiores aplican a los registros operativos visibles.</p>
+              </div>
+            </div>
+            <div class="table-scroll routes-scroll"><table id="routesTable" class="data-table compact routes-table"></table></div>
+          </div>
+        </section>
+
+        <section id="maintenance" class="view">
+          <div class="section-head">
+            <div><p class="eyebrow">Mantenimiento</p><h2>Preventivos, correctivos y talleres</h2></div>
+            <div class="actions">
+              <button id="dedupeMaintenanceBtn" type="button">Limpiar duplicados</button>
+            </div>
+          </div>
+          <div id="maintenanceSummary" class="maintenance-summary"></div>
+          <div class="panel maintenance-panel">
+            <div class="panel-head maintenance-panel-head">
+              <div>
+                <h3>Mantenimientos</h3>
+                <p id="maintenanceTableContext" class="muted">Filtros activos aplicados a la tabla.</p>
+              </div>
+              <span id="maintenanceCountBadge" class="badge">0 registros</span>
+            </div>
+            <div class="table-scroll maintenance-scroll"><table id="maintenanceTable" class="data-table compact maintenance-table"></table></div>
+          </div>
+        </section>
+
+        <section id="alerts" class="view">
+          <div class="section-head">
+            <div><p class="eyebrow">Control preventivo</p><h2>Alertas por kilometraje u horas</h2></div>
+            <div class="actions">
+              <button id="printAlertsBtn" type="button" title="Imprimir panel de alertas">Imprimir panel</button>
+              <button id="driveAlertsPdfBtn" class="primary-button" type="button" title="Crear PDF de alertas en Drive">Generar PDF Alertas</button>
+            </div>
+          </div>
+          <div id="alertsPdfResult" class="result-box"></div>
+          <div id="alertBoard" class="alert-board"></div>
+        </section>
+
+        <section id="fleet" class="view">
+          <div class="section-head">
+            <div><p class="eyebrow">Inventario gerencial</p><h2>Flota vehicular registrada</h2></div>
+            <div class="actions fleet-save-actions">
+              <button id="dedupeFleetBtn" type="button">Limpiar duplicados</button>
+              <button id="saveFleetProjectsBtn" class="primary-button" type="button" disabled>Guardar cambios</button>
+            </div>
+          </div>
+          <div id="fleetProjectCards" class="fleet-project-cards"></div>
+          <div class="panel fleet-panel">
+            <div class="panel-head fleet-panel-head">
+              <div>
+                <h3>Vehiculos registrados</h3>
+                <p id="fleetTableContext" class="muted">Filtros activos aplicados a la tabla.</p>
+              </div>
+              <span id="fleetCountBadge" class="badge">0 vehiculos</span>
+            </div>
+            <div class="table-scroll fleet-scroll"><table id="fleetTable" class="data-table compact fleet-table"></table></div>
+          </div>
+          <datalist id="typeOptions"></datalist>
+          <datalist id="brandOptions"></datalist>
+        </section>
+
+        <section id="reports" class="view">
+          <div class="section-head">
+            <div><p class="eyebrow">Gerencia</p><h2>Informe gerencial consolidado</h2></div>
+          </div>
+          <div class="panel report-preview-panel">
+            <div class="panel-head report-preview-head">
+              <div>
+                <h3>Vista previa del informe gerencial</h3>
+                <p id="reportPreviewContext" class="muted">Los filtros superiores actualizan automaticamente este informe.</p>
+              </div>
+              <span class="badge">Listo para imprimir / PDF</span>
+            </div>
+            <div id="reportPreview" class="report-preview"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="fleetImportModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="fleetImportTitle">
+      <div class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Base maestra</p>
+            <h2 id="fleetImportTitle">Registrar o importar flota vehicular</h2>
+          </div>
+          <button id="closeFleetImportBtn" type="button" title="Cerrar">Cerrar</button>
+        </div>
+        <div class="modal-body fleet-import-grid">
+          <form id="fleetForm" class="panel form-panel">
+            <h3>Ingreso manual de vehiculo</h3>
+            <label>Placa o codigo<input name="plate" type="text" required></label>
+            <label>Proyecto<select name="project" data-project-select></select></label>
+            <label>Tipo<input name="type" list="typeOptions"></label>
+            <label>Marca<input name="brand" list="brandOptions"></label>
+            <label>Modelo<input name="model" type="text"></label>
+            <label>Serie motor<input name="motorSerial" type="text"></label>
+            <label>Serie chasis<input name="chassisSerial" type="text"></label>
+            <label>Ano<input name="year" type="number"></label>
+            <label>Color<input name="color" type="text"></label>
+            <label>Ciclo motor km/h<input name="motorCycleKm" type="number" step="0.01" placeholder="Vacuum: 250 horas"></label>
+            <label>Ciclo caja km/h<input name="boxCycleKm" type="number" step="0.01" placeholder="Vacuum: 5000 horas"></label>
+            <button class="primary-button full" type="submit">Guardar vehiculo</button>
+          </form>
+          <div class="panel form-panel">
+            <h3>Importar archivo Excel o CSV</h3>
+            <p class="muted full">Orden esperado: Placa o codigo, Proyecto, Tipo, Marca, Modelo, Serie de motor, Serie de chasis, Anio, Color, Ciclo motor km/h, Ciclo caja km/h. Si el tipo es Vacuum y dejas ciclos vacios, se asigna 250 h motor y 5000 h caja.</p>
+            <label class="full">Archivo Excel / CSV<input id="fleetImportFile" type="file" accept=".csv,.txt,.xlsx,.xls"></label>
+            <button id="fleetImportFileBtn" class="primary-button full" type="button">Importar archivo</button>
+            <label class="full">O pega CSV aqui<textarea id="fleetCsvImport" rows="8" placeholder="QAA-3164,ENAP,Cabezal,SHACM,..."></textarea></label>
+            <button id="fleetImportCsvBtn" type="button">Importar CSV pegado</button>
+            <div id="fleetImportResult" class="result-box full"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="maintenanceImportModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="maintenanceImportTitle">
+      <div class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Mantenimiento</p>
+            <h2 id="maintenanceImportTitle">Registrar o importar mantenimientos</h2>
+          </div>
+          <button id="closeMaintenanceImportBtn" type="button" title="Cerrar">Cerrar</button>
+        </div>
+        <div class="modal-body fleet-import-grid">
+          <form id="maintenanceForm" class="panel form-panel">
+            <h3>Ingreso manual de mantenimiento</h3>
+            <label>Placa<select name="plate" data-vehicle-select required></select></label>
+            <label>Taller<select name="workshop" id="workshopSelect"></select></label>
+            <label>Fecha de entrada<input name="entryDate" type="date" required></label>
+            <label>Fecha de salida<input name="exitDate" type="date" required></label>
+            <label>Tipo<select name="type" id="maintenanceType"><option>Preventivo</option><option>Correctivo</option><option>Prev Caja y Corona</option></select></label>
+            <label>Kilometraje / horas<input name="odometer" type="number" step="0.01"></label>
+            <label>Km / horas entre mantenimiento<input name="kmBetween" type="number" step="0.01"></label>
+            <label id="maintenancePreventiveTimeWrap">Tiempo preventivo (horas)<input name="preventiveTime" type="number" step="0.01"></label>
+            <label id="maintenanceCorrectiveTimeWrap">Tiempo correctivo (horas)<input name="correctiveTime" type="number" step="0.01"></label>
+            <label>Paquete<select name="package" id="packageSelect"></select></label>
+            <label>Numero de orden<input name="orderNumber" type="text"></label>
+            <label>Costo por mantenimiento ($)<input name="cost" type="number" step="0.01"></label>
+            <label>Mecanico<input name="mechanic" type="text"></label>
+            <label class="full">Observaciones<textarea name="observations" rows="3"></textarea></label>
+            <button class="primary-button full" type="submit">Guardar mantenimiento</button>
+          </form>
+          <div class="panel form-panel">
+            <h3>Importar archivo Excel o CSV</h3>
+            <p class="muted full">Orden esperado: Placa, taller, fecha de entrada, fecha de salida, tipo, kilometraje u horas, km/horas entre mantenimiento, tiempo preventivo, tiempo correctivo, paquete, numero de orden, costo por mantenimiento, mecanico y observaciones.</p>
+            <label class="full">Archivo Excel / CSV<input id="maintenanceImportFile" type="file" accept=".csv,.txt,.xlsx,.xls"></label>
+            <button id="maintenanceImportFileBtn" class="primary-button full" type="button">Importar archivo</button>
+            <label class="full">O pega CSV aqui<textarea id="maintenanceCsvImport" rows="8" placeholder="QAA-3164,Taller ABC,2025-12-01,2025-12-02,Correctivo,120000,8000,0,3,Mecanico,OT-001,350,Juan Perez,Observaciones"></textarea></label>
+            <button id="maintenanceImportCsvBtn" type="button">Importar CSV pegado</button>
+            <div id="maintenanceImportResult" class="result-box full"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="routeImportModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="routeImportTitle">
+      <div class="modal-card">
+        <div class="modal-head">
+          <div>
+            <p class="eyebrow">Operacion</p>
+            <h2 id="routeImportTitle">Registrar o importar rutas</h2>
+          </div>
+          <button id="closeRouteImportBtn" type="button" title="Cerrar">Cerrar</button>
+        </div>
+        <div class="modal-body fleet-import-grid">
+          <form id="routeForm" class="panel form-panel">
+            <h3>Ingreso manual de ruta / lectura</h3>
+            <label>Fecha de Inicio<input name="startDate" type="date" required></label>
+            <label>Fecha Final<input name="endDate" type="date" required></label>
+            <label>Placa<select name="plate" data-vehicle-select required></select></label>
+            <label>Km / Horas inicial<input name="kmStart" type="text" inputmode="decimal"></label>
+            <label>Km / Horas final<input name="kmEnd" type="text" inputmode="decimal"></label>
+            <label>Total de Km / Horas<input name="kms" type="text" inputmode="decimal"></label>
+            <label>Horas trabajadas<input name="hours" type="text" inputmode="decimal"></label>
+            <label>Cantidad de galones cargados<input name="gallons" type="text" inputmode="decimal" placeholder="Ej: 100,5"></label>
+            <label class="full">Observaciones<textarea name="observations" rows="3"></textarea></label>
+            <button class="primary-button full" type="submit">Guardar ruta</button>
+          </form>
+          <div class="panel form-panel">
+            <h3>Importar archivo Excel o CSV</h3>
+            <p class="muted full">Orden esperado: fecha de inicio, fecha final, placa, km/horas inicial, km/horas final, total kilometros u horas, horas trabajadas, galones cargados y observaciones. Para Vacuum usa horas.</p>
+            <label class="full">Archivo Excel / CSV<input id="routeImportFile" type="file" accept=".csv,.txt,.xlsx,.xls"></label>
+            <button id="routeImportFileBtn" class="primary-button full" type="button">Importar archivo</button>
+            <label class="full">O pega CSV aqui<textarea id="routeCsvImport" rows="8" placeholder="2025-12-01,2025-12-31,QAA-3164,120000,128000,8000,180,650,Observaciones"></textarea></label>
+            <button id="routeImportCsvBtn" type="button">Importar CSV pegado</button>
+            <div id="routeImportResult" class="result-box full"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <?!= include('JavaScript'); ?>
+  </body>
+</html>
