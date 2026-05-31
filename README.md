@@ -1,5 +1,5 @@
 # 📊 Sistema Web de KPIs de Mantenimiento - Vehículos Pesados
-Bienvenidos! Este es un proyecto que consiste en una aplicación web interactiva desarrolada con IA, que automatiza el control de indicadores clave (KPIs) de mantenimiento vehicular,  para una flota de vehículos pesados, tomando como base un modelo analítico creado y estructurado en **Microsoft Excel**.
+Bienvenidos! Este es un proyecto que consiste en una aplicación web interactiva desarrolada con IA, que automatiza el control de indicadores clave (KPIs) de mantenimiento vehicular de los tres ultimos meses de 2025,  para una flota de vehículos pesados, tomando como base un modelo analítico creado y estructurado en **Microsoft Excel**.
 
 ---
 
